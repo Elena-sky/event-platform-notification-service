@@ -4,7 +4,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-from app.messaging.rabbitmq import Consumer
+from app.core.config import settings
+from app.messaging.rabbitmq import Consumer, retry_queue_for_attempt
 
 
 def test_invalid_json_body_published_to_dlq_then_acked() -> None:
@@ -48,10 +49,18 @@ async def _json_array_body_published_to_dlq_then_acked() -> None:
     msg.headers = {}
     msg.ack = AsyncMock()
 
-    await consumer._process_message(msg, source_queue="notification.email.retry")
+    await consumer._process_message(msg, source_queue="notification.retry.5s")
 
     consumer._dlq_exchange.publish.assert_called_once()
     msg.ack.assert_called_once()
     published = consumer._dlq_exchange.publish.call_args[0][0]
     stored = json.loads(published.body.decode("utf-8"))
     assert "must be a JSON object" in stored["decode_error"]
+
+
+def test_retry_queue_for_attempt_maps_three_tiers() -> None:
+    assert retry_queue_for_attempt(1) == settings.retry_queue_1
+    assert retry_queue_for_attempt(2) == settings.retry_queue_2
+    assert retry_queue_for_attempt(3) == settings.retry_queue_3
+    assert retry_queue_for_attempt(4) is None
+    assert retry_queue_for_attempt(0) is None

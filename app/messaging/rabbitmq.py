@@ -41,12 +41,20 @@ def _retry_count_from_headers(headers: dict[str, Any]) -> int:
         return 0
 
 
+def retry_queue_for_attempt(next_retry_count: int) -> str | None:
+    """Map attempt number (1-based) to delay queue name, or ``None``."""
+    tiers = settings.retry_tiers
+    idx = next_retry_count - 1
+    if idx < 0 or idx >= len(tiers):
+        return None
+    return tiers[idx][0]
+
+
 class Consumer:
     def __init__(self) -> None:
         self._connection: aio_pika.RobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._events_exchange: AbstractRobustExchange | None = None
-        self._retry_exchange: AbstractRobustExchange | None = None
         self._dlq_exchange: AbstractRobustExchange | None = None
 
     async def start(self) -> None:
@@ -61,33 +69,20 @@ class Consumer:
             durable=True,
         )
 
-        self._retry_exchange = await self._channel.declare_exchange(
-            settings.rabbitmq_retry_exchange,
-            ExchangeType.DIRECT,
-            durable=True,
-        )
-
-        self._dlq_exchange = await self._channel.declare_exchange(
-            settings.rabbitmq_dlq_exchange,
-            ExchangeType.DIRECT,
-            durable=True,
-        )
+        await self._declare_retry_queues()
 
         main_queue = await self._channel.declare_queue(
             settings.rabbitmq_notification_queue,
             durable=True,
         )
 
-        for key in settings.notification_binding_keys:
+        for key in settings.main_queue_binding_keys:
             await main_queue.bind(self._events_exchange, routing_key=key)
 
-        retry_queue = await self._channel.declare_queue(
-            settings.rabbitmq_retry_queue,
+        self._dlq_exchange = await self._channel.declare_exchange(
+            settings.rabbitmq_dlq_exchange,
+            ExchangeType.DIRECT,
             durable=True,
-        )
-        await retry_queue.bind(
-            self._retry_exchange,
-            routing_key=settings.rabbitmq_retry_routing_key,
         )
 
         dlq_queue = await self._channel.declare_queue(
@@ -103,25 +98,38 @@ class Consumer:
             "Notification consumer started",
             extra={
                 "main_queue": settings.rabbitmq_notification_queue,
-                "bindings": settings.notification_binding_keys,
-                "retry_queue": settings.rabbitmq_retry_queue,
+                "bindings": settings.main_queue_binding_keys,
+                "retry_tiers": [
+                    {"queue": name, "ttl_ms": ttl} for name, ttl in settings.retry_tiers
+                ],
                 "dlq_queue": settings.rabbitmq_dlq_queue,
                 "max_retries": settings.notification_max_retries,
             },
         )
 
         await main_queue.consume(self.process_main_message)
-        await retry_queue.consume(self.process_retry_message)
 
         await asyncio.Future()
+
+    async def _declare_retry_queues(self) -> None:
+        """TTL buffers; after expiry messages dead-letter to the events exchange."""
+        if not self._channel:
+            raise RuntimeError("Channel is not initialized")
+
+        for queue_name, ttl_ms in settings.retry_tiers:
+            await self._channel.declare_queue(
+                queue_name,
+                durable=True,
+                arguments={
+                    "x-message-ttl": ttl_ms,
+                    "x-dead-letter-exchange": settings.rabbitmq_events_exchange,
+                },
+            )
 
     async def process_main_message(self, message: IncomingMessage) -> None:
         await self._process_message(
             message, source_queue=settings.rabbitmq_notification_queue
         )
-
-    async def process_retry_message(self, message: IncomingMessage) -> None:
-        await self._process_message(message, source_queue=settings.rabbitmq_retry_queue)
 
     async def _process_message(
         self, message: IncomingMessage, source_queue: str
@@ -230,10 +238,23 @@ class Consumer:
             await message.ack()
             return
 
+        queue_name = retry_queue_for_attempt(next_retry_count)
+        if not queue_name:
+            await self._publish_to_dlq(
+                payload=payload,
+                retry_count=retry_count,
+                error_reason=(
+                    f"No retry tier for attempt {next_retry_count}: {error_reason}"
+                ),
+            )
+            await message.ack()
+            return
+
         await self._publish_to_retry(
             payload=payload,
             retry_count=next_retry_count,
             error_reason=error_reason,
+            retry_queue_name=queue_name,
         )
         await message.ack()
 
@@ -242,9 +263,10 @@ class Consumer:
         payload: dict[str, Any],
         retry_count: int,
         error_reason: str,
+        retry_queue_name: str,
     ) -> None:
-        if not self._retry_exchange:
-            raise RuntimeError("Retry exchange is not initialized")
+        if not self._channel:
+            raise RuntimeError("Channel is not initialized")
 
         body = json.dumps(payload, default=str).encode("utf-8")
 
@@ -260,17 +282,17 @@ class Consumer:
             },
         )
 
-        await self._retry_exchange.publish(
+        await self._channel.default_exchange.publish(
             retry_message,
-            routing_key=settings.rabbitmq_retry_routing_key,
+            routing_key=retry_queue_name,
         )
 
         logger.info(
-            "Message published to retry queue",
+            "Message published to retry queue (TTL delay)",
             extra={
                 "event_id": payload.get("event_id"),
                 "retry_count": retry_count,
-                "retry_queue": settings.rabbitmq_retry_queue,
+                "retry_queue": retry_queue_name,
             },
         )
 
