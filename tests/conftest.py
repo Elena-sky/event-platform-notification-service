@@ -1,4 +1,4 @@
-"""Load test env before importing ``app`` (Settings has no defaults)."""
+"""Load test env before importing ``app``."""
 
 from pathlib import Path
 

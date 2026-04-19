@@ -1,4 +1,4 @@
-"""Settings from ``.env`` / environment only (no in-code broker topology defaults)."""
+"""Application settings from environment / ``.env`` (no in-code defaults)."""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,11 +12,22 @@ class Settings(BaseSettings):
     rabbitmq_user: str
     rabbitmq_password: str
 
-    rabbitmq_exchange: str
-    rabbitmq_queue: str
-    rabbitmq_binding_keys: str
+    rabbitmq_events_exchange: str
+    rabbitmq_events_exchange_type: str
+
+    rabbitmq_notification_queue: str
+    rabbitmq_notification_binding_keys: str
+
+    rabbitmq_retry_exchange: str
+    rabbitmq_retry_queue: str
+    rabbitmq_retry_routing_key: str
+
+    rabbitmq_dlq_exchange: str
+    rabbitmq_dlq_queue: str
+    rabbitmq_dlq_routing_key: str
 
     rabbitmq_prefetch: int
+    notification_max_retries: int
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -33,8 +44,12 @@ class Settings(BaseSettings):
         )
 
     @property
-    def binding_keys(self) -> list[str]:
-        return [k.strip() for k in self.rabbitmq_binding_keys.split(",") if k.strip()]
+    def notification_binding_keys(self) -> list[str]:
+        return [
+            key.strip()
+            for key in self.rabbitmq_notification_binding_keys.split(",")
+            if key.strip()
+        ]
 
 
 settings = Settings()
