@@ -5,7 +5,6 @@ from collections.abc import Coroutine, Iterator
 from typing import Any
 
 import pytest
-
 from app.domain.exceptions import FatalNotificationError, TemporaryNotificationError
 from app.services import notification_handler as nh
 
