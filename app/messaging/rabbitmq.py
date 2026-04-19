@@ -1,10 +1,11 @@
 import asyncio
+import hashlib
 import json
 from typing import Any
 
 import aio_pika
 from aio_pika import DeliveryMode, ExchangeType, IncomingMessage, Message
-from aio_pika.abc import AbstractRobustExchange, AbstractRobustQueue, RobustChannel
+from aio_pika.abc import AbstractRobustChannel, AbstractRobustExchange
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -43,7 +44,7 @@ def _retry_count_from_headers(headers: dict[str, Any]) -> int:
 class Consumer:
     def __init__(self) -> None:
         self._connection: aio_pika.RobustConnection | None = None
-        self._channel: RobustChannel | None = None
+        self._channel: AbstractRobustChannel | None = None
         self._events_exchange: AbstractRobustExchange | None = None
         self._retry_exchange: AbstractRobustExchange | None = None
         self._dlq_exchange: AbstractRobustExchange | None = None
@@ -129,9 +130,10 @@ class Consumer:
             payload = self._decode_payload(message)
         except FatalNotificationError as exc:
             logger.error(
-                "Invalid message body",
+                "Invalid message body, publishing to DLQ",
                 extra={"source_queue": source_queue, "error": str(exc)},
             )
+            await self._publish_invalid_body_to_dlq(message, source_queue, exc)
             await message.ack()
             return
 
@@ -307,6 +309,26 @@ class Consumer:
                 "retry_count": retry_count,
                 "dlq_queue": settings.rabbitmq_dlq_queue,
             },
+        )
+
+    async def _publish_invalid_body_to_dlq(
+        self,
+        message: IncomingMessage,
+        source_queue: str,
+        exc: FatalNotificationError,
+    ) -> None:
+        digest = hashlib.sha256(message.body).hexdigest()[:24]
+        dlq_payload: dict[str, Any] = {
+            "event_id": f"invalid-body-{digest}",
+            "event_type": "__invalid_body__",
+            "raw_body": message.body.decode("utf-8", errors="replace"),
+            "decode_error": str(exc),
+            "source_queue": source_queue,
+        }
+        await self._publish_to_dlq(
+            payload=dlq_payload,
+            retry_count=0,
+            error_reason=str(exc),
         )
 
     @staticmethod

@@ -84,5 +84,6 @@ If RabbitMQ is unreachable, the process exits with an error.
 - **Success** → `ack` on the main or retry queue message.
 - **`TemporaryNotificationError`** or unexpected errors → republish to the retry exchange with incremented `x-retry-count` in headers, then `ack`. If retries exceed `NOTIFICATION_MAX_RETRIES` → publish to DLQ, then `ack`.
 - **`FatalNotificationError`** (e.g. bad payload, unsupported `event_type`, missing `order_id` for `order.created`) → publish to DLQ, then `ack`.
+- **Unparseable message body** (not JSON or not a JSON object) → publish a diagnostic record to DLQ (`raw_body`, `decode_error`, synthetic `event_id`), then `ack` — no silent drop.
 
 **Manual checks** (with gateway on `http://localhost:8000`): send `user.registered` with `payload.email`; send `payment.failed` with `payload.simulate_temporary_failure: true` to exercise retry → DLQ after max retries; send `payment.failed` without `email` for immediate DLQ. For `order.created`, include `order_id` in `payload` (required).
