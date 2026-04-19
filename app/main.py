@@ -6,14 +6,10 @@ from app.messaging.rabbitmq import Consumer
 configure_logging()
 
 
-async def _run() -> None:
+async def main() -> None:
     consumer = Consumer()
     await consumer.start()
 
 
-def main() -> None:
-    asyncio.run(_run())
-
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
