@@ -41,20 +41,12 @@ def _retry_count_from_headers(headers: dict[str, Any]) -> int:
         return 0
 
 
-def retry_queue_for_attempt(next_retry_count: int) -> str | None:
-    """Map attempt number (1-based) to delay queue name, or ``None``."""
-    tiers = settings.retry_tiers
-    idx = next_retry_count - 1
-    if idx < 0 or idx >= len(tiers):
-        return None
-    return tiers[idx][0]
-
-
 class Consumer:
     def __init__(self) -> None:
         self._connection: aio_pika.RobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._events_exchange: AbstractRobustExchange | None = None
+        self._retry_exchange: AbstractRobustExchange | None = None
         self._dlq_exchange: AbstractRobustExchange | None = None
 
     async def start(self) -> None:
@@ -69,7 +61,11 @@ class Consumer:
             durable=True,
         )
 
-        await self._declare_retry_queues()
+        self._retry_exchange = await self._channel.declare_exchange(
+            settings.rabbitmq_retry_exchange,
+            _exchange_type_from_settings(settings.rabbitmq_retry_exchange_type),
+            durable=True,
+        )
 
         main_queue = await self._channel.declare_queue(
             settings.rabbitmq_notification_queue,
@@ -99,32 +95,15 @@ class Consumer:
             extra={
                 "main_queue": settings.rabbitmq_notification_queue,
                 "bindings": settings.main_queue_binding_keys,
-                "retry_tiers": [
-                    {"queue": name, "ttl_ms": ttl} for name, ttl in settings.retry_tiers
-                ],
+                "retry_exchange": settings.rabbitmq_retry_exchange,
+                "retry_routing_key": settings.rabbitmq_retry_routing_key,
                 "dlq_queue": settings.rabbitmq_dlq_queue,
-                "max_retries": settings.notification_max_retries,
             },
         )
 
         await main_queue.consume(self.process_main_message)
 
         await asyncio.Future()
-
-    async def _declare_retry_queues(self) -> None:
-        """TTL buffers; after expiry messages dead-letter to the events exchange."""
-        if not self._channel:
-            raise RuntimeError("Channel is not initialized")
-
-        for queue_name, ttl_ms in settings.retry_tiers:
-            await self._channel.declare_queue(
-                queue_name,
-                durable=True,
-                arguments={
-                    "x-message-ttl": ttl_ms,
-                    "x-dead-letter-exchange": settings.rabbitmq_events_exchange,
-                },
-            )
 
     async def process_main_message(self, message: IncomingMessage) -> None:
         await self._process_message(
@@ -183,7 +162,7 @@ class Consumer:
                 },
             )
 
-            await self._handle_temporary_failure(
+            await self._forward_to_retry_orchestrator(
                 message, payload, retry_count, str(exc)
             )
 
@@ -216,59 +195,24 @@ class Consumer:
                 },
             )
 
-            await self._handle_temporary_failure(
+            await self._forward_to_retry_orchestrator(
                 message, payload, retry_count, str(exc)
             )
 
-    async def _handle_temporary_failure(
+    async def _forward_to_retry_orchestrator(
         self,
         message: IncomingMessage,
         payload: dict[str, Any],
         retry_count: int,
         error_reason: str,
     ) -> None:
-        next_retry_count = retry_count + 1
-
-        if next_retry_count > settings.notification_max_retries:
-            await self._publish_to_dlq(
-                payload=payload,
-                retry_count=retry_count,
-                error_reason=f"Max retries exceeded: {error_reason}",
-            )
-            await message.ack()
-            return
-
-        queue_name = retry_queue_for_attempt(next_retry_count)
-        if not queue_name:
-            await self._publish_to_dlq(
-                payload=payload,
-                retry_count=retry_count,
-                error_reason=(
-                    f"No retry tier for attempt {next_retry_count}: {error_reason}"
-                ),
-            )
-            await message.ack()
-            return
-
-        await self._publish_to_retry(
-            payload=payload,
-            retry_count=next_retry_count,
-            error_reason=error_reason,
-            retry_queue_name=queue_name,
-        )
-        await message.ack()
-
-    async def _publish_to_retry(
-        self,
-        payload: dict[str, Any],
-        retry_count: int,
-        error_reason: str,
-        retry_queue_name: str,
-    ) -> None:
-        if not self._channel:
-            raise RuntimeError("Channel is not initialized")
+        if not self._retry_exchange:
+            raise RuntimeError("Retry exchange is not initialized")
 
         body = json.dumps(payload, default=str).encode("utf-8")
+
+        routing_key_prop = getattr(message, "routing_key", None)
+        original_rk = routing_key_prop if isinstance(routing_key_prop, str) else ""
 
         retry_message = Message(
             body=body,
@@ -278,23 +222,26 @@ class Consumer:
             type=payload.get("event_type"),
             headers={
                 "x-retry-count": retry_count,
+                "x-original-routing-key": original_rk,
                 "x-last-error": error_reason,
             },
         )
 
-        await self._channel.default_exchange.publish(
+        await self._retry_exchange.publish(
             retry_message,
-            routing_key=retry_queue_name,
+            routing_key=settings.rabbitmq_retry_routing_key,
         )
 
         logger.info(
-            "Message published to retry queue (TTL delay)",
+            "Forwarded failure to retry orchestrator",
             extra={
                 "event_id": payload.get("event_id"),
                 "retry_count": retry_count,
-                "retry_queue": retry_queue_name,
+                "original_routing_key": original_rk,
             },
         )
+
+        await message.ack()
 
     async def _publish_to_dlq(
         self,
