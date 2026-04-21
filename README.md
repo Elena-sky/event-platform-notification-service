@@ -2,6 +2,39 @@
 
 Async **RabbitMQ consumer** for the event platform: subscribes to the events **topic** exchange, handles `user.registered`, `order.created`, and `payment.failed`, and routes failures to the shared **retry orchestrator** (`retry.exchange`) or **DLQ** (`TemporaryNotificationError` vs `FatalNotificationError`). Centralized retry limits and backoff live in [event-platform-retry-orchestrator-service](../event-platform-retry-orchestrator-service).
 
+## Flow
+
+```mermaid
+flowchart TD
+    ET(["events.topic"])
+    ET -->|"binding: user.*, order.created, payment.failed"| NQ["notifications.queue"]
+
+    NQ --> DEC{"Decode JSON\n+ validate"}
+    DEC -->|parse error| DLQD["publish diagnostic\nto DLQ"]
+    DLQD --> ACKD["ack"]
+
+    DEC -->|ok| HE["handle_event()"]
+    HE -->|success| ACK["ack ✓"]
+
+    HE -->|FatalNotificationError\ne.g. unsupported type,\nmissing required field| DLQF["publish to DLQ"]
+    DLQF --> ACKF["ack ✓"]
+
+    HE -->|TemporaryNotificationError\ne.g. simulated timeout,\noutage| RXP["publish to retry.exchange\nheaders: x-retry-count\nx-original-routing-key\nx-last-error"]
+    RXP --> ACKR["ack ✓"]
+
+    RXP -.->|handled by| RO["retry-orchestrator-service"]
+```
+
+```mermaid
+flowchart LR
+    subgraph "event_type routing"
+        UR["user.registered\n→ send welcome email"]
+        OC["order.created\n→ send order confirmation"]
+        PF["payment.failed\n→ send payment alert"]
+    end
+    NQ(["notifications.queue"]) --> UR & OC & PF
+```
+
 ## Repositories
 
 [GitHub: Elena-sky](https://github.com/Elena-sky)

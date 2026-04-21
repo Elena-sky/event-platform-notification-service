@@ -1,9 +1,12 @@
+import asyncio
+
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.domain.exceptions import FatalNotificationError, TemporaryNotificationError
 
 logger = get_logger(__name__)
 
-processed_events: set[str] = set()  # mock idempotency
+processed_events: set[str] = set()  # mock idempotency; use Redis when scaling out
 
 
 async def handle_event(event: dict) -> None:
@@ -17,6 +20,11 @@ async def handle_event(event: dict) -> None:
     if event_key in processed_events:
         logger.warning("Duplicate event skipped", extra={"event_id": event_key})
         return
+
+    # Artificial delay for load-testing throughput / prefetch tuning.
+    # Set SIMULATED_PROCESSING_DELAY_MS=0 to disable.
+    if settings.simulated_processing_delay_ms > 0:
+        await asyncio.sleep(settings.simulated_processing_delay_ms / 1000)
 
     if event_type == "user.registered":
         await send_welcome_email(event)
