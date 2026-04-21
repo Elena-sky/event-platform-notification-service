@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     rabbitmq_dlq_routing_key: str
 
     rabbitmq_prefetch: int
+    notification_max_retries: int
+    # 0 = off. Nonzero: artificial delay for load / prefetch experiments.
+    simulated_processing_delay_ms: int
 
     model_config = SettingsConfigDict(
         env_file=".env",
