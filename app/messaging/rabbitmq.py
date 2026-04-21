@@ -9,8 +9,8 @@ from aio_pika.abc import AbstractRobustChannel, AbstractRobustExchange
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.messaging.amqp_retry import connect_robust_when_ready
 from app.domain.exceptions import FatalNotificationError, TemporaryNotificationError
+from app.messaging.amqp_retry import connect_robust_when_ready
 from app.services.notification_handler import handle_event
 
 logger = get_logger(__name__)
