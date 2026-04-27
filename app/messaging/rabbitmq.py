@@ -15,6 +15,7 @@ from app.services.notification_handler import handle_event
 
 logger = get_logger(__name__)
 
+QUORUM_QUEUE_ARGS: dict[str, str] = {"x-queue-type": "quorum"}
 
 def _exchange_type_from_settings(name: str) -> ExchangeType:
     key = name.lower().strip()
@@ -74,6 +75,7 @@ class Consumer:
         main_queue = await self._channel.declare_queue(
             settings.rabbitmq_notification_queue,
             durable=True,
+            arguments=QUORUM_QUEUE_ARGS,
         )
 
         for key in settings.main_queue_binding_keys:
@@ -88,6 +90,7 @@ class Consumer:
         dlq_queue = await self._channel.declare_queue(
             settings.rabbitmq_dlq_queue,
             durable=True,
+            arguments=QUORUM_QUEUE_ARGS,
         )
         await dlq_queue.bind(
             self._dlq_exchange,
