@@ -4,10 +4,21 @@ Async **RabbitMQ consumer** for the event platform: subscribes to the events **t
 
 ## Flow
 
+**Path through this service (read left → right):** the broker routes matching events into **`notification.email`** (declared as a **quorum** queue); this process **then** decodes, runs `handle_event`, and on failure forwards to the retry path or DLQ. The next diagram is the full branching (not a left-to-right line).
+
+```mermaid
+flowchart LR
+    ET0(["events.topic"]) -->|bindings| NQ0(["notification.email\nquorum"])
+    NQ0 --> H0["decode →\nhandle_event()"]
+    H0 -->|success| OK0["ack"]
+    H0 -.->|temp failure| R0["retry.exchange\n→ retry.orchestrator"]
+    H0 -.->|fatal / bad payload| D0["notification.email.dlq\nquorum"]
+```
+
 ```mermaid
 flowchart TD
     ET(["events.topic"])
-    ET -->|"binding: user.*, order.created, payment.failed"| NQ["notifications.queue"]
+    ET -->|"binding: user.*, order.created, payment.failed"| NQ["notification.email\nquorum"]
 
     NQ --> DEC{"Decode JSON\n+ validate"}
     DEC -->|parse error| DLQD["publish diagnostic\nto DLQ"]
@@ -32,7 +43,7 @@ flowchart LR
         OC["order.created\n→ send order confirmation"]
         PF["payment.failed\n→ send payment alert"]
     end
-    NQ(["notifications.queue"]) --> UR & OC & PF
+    NQ(["notification.email"]) --> UR & OC & PF
 ```
 
 ## Repositories
