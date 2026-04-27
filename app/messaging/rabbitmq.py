@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 QUORUM_QUEUE_ARGS: dict[str, str] = {"x-queue-type": "quorum"}
 
+
 def _exchange_type_from_settings(name: str) -> ExchangeType:
     key = name.lower().strip()
     mapping: dict[str, ExchangeType] = {
