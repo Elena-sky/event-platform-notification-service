@@ -3,10 +3,11 @@ import asyncio
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.domain.exceptions import FatalNotificationError, TemporaryNotificationError
+from app.services.idempotency_store import idempotency_store
 
 logger = get_logger(__name__)
 
-processed_events: set[str] = set()  # mock idempotency; use Redis when scaling out
+IDEMPOTENCY_SCOPE = "notification"
 
 
 async def handle_event(event: dict) -> None:
@@ -17,25 +18,49 @@ async def handle_event(event: dict) -> None:
         raise FatalNotificationError(f"Missing required field: {e.args[0]}") from e
 
     event_key = str(event_id)
-    if event_key in processed_events:
-        logger.warning("Duplicate event skipped", extra={"event_id": event_key})
+
+    acquired = await idempotency_store.try_start_processing(
+        event_id=event_key,
+        scope=IDEMPOTENCY_SCOPE,
+    )
+    if not acquired:
+        logger.warning(
+            "Duplicate notification event skipped",
+            extra={"event_id": event_key, "event_type": event_type},
+        )
         return
 
-    # Artificial delay for load-testing throughput / prefetch tuning.
-    # Set SIMULATED_PROCESSING_DELAY_MS=0 to disable.
-    if settings.simulated_processing_delay_ms > 0:
-        await asyncio.sleep(settings.simulated_processing_delay_ms / 1000)
+    try:
+        if settings.simulated_processing_delay_ms > 0:
+            await asyncio.sleep(settings.simulated_processing_delay_ms / 1000)
 
-    if event_type == "user.registered":
-        await send_welcome_email(event)
-    elif event_type == "order.created":
-        await send_order_email(event)
-    elif event_type == "payment.failed":
-        await send_payment_failed_email(event)
-    else:
-        raise FatalNotificationError(f"Unsupported event type: {event_type}")
+        if event_type == "user.registered":
+            await send_welcome_email(event)
+        elif event_type == "order.created":
+            await send_order_email(event)
+        elif event_type == "payment.failed":
+            await send_payment_failed_email(event)
+        else:
+            raise FatalNotificationError(f"Unsupported event type: {event_type}")
 
-    processed_events.add(event_key)
+        await idempotency_store.mark_processed(
+            event_id=event_key,
+            scope=IDEMPOTENCY_SCOPE,
+        )
+
+    except TemporaryNotificationError:
+        await idempotency_store.release_processing(
+            event_id=event_key,
+            scope=IDEMPOTENCY_SCOPE,
+        )
+        raise
+
+    except Exception:
+        await idempotency_store.release_processing(
+            event_id=event_key,
+            scope=IDEMPOTENCY_SCOPE,
+        )
+        raise
 
 
 async def send_welcome_email(event: dict) -> None:

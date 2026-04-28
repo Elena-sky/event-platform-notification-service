@@ -14,3 +14,8 @@ def test_main_queue_binding_keys_match_notification_keys() -> None:
 
 def test_rabbitmq_url_format() -> None:
     assert settings.rabbitmq_url.startswith("amqp://")
+
+
+def test_redis_url_format() -> None:
+    assert settings.redis_url.startswith("redis://")
+    assert ":6379/" in settings.redis_url or ":6379/0" in settings.redis_url
